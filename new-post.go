@@ -2,6 +2,7 @@ package aiblog
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -28,10 +29,11 @@ var githubToken string
 var githubRepo string
 
 var getTitleRegex = regexp.MustCompile(`(?m)^title:\s+(.*)$`)
+var contentForm = regexp.MustCompile(`(?m)---\s(?:.*\s)+---[\s\S]*`)
 
 const gptNewPostPrompt = `Act as a tech blogger.  Write a blog post using markdown syntax about a current relevant topic in programming. At the top of the post write a metadata block in this syntax
 ---
-title: 
+title: %s 
 categories: []
 tags: []
 ---
@@ -46,14 +48,15 @@ func init() {
 
 	// TODO Validate env is not null
 
-    // Create openai client
+	// Create openai client
 	client = openai.NewClient(os.Getenv("OPENAI_API_TOKEN"))
 
-    // Register Function
-    functions.CloudEvent("CreateNewPost", createPost)
+	// Register Function
+	functions.CloudEvent("CreateNewPost", createPost)
 }
 
-func generateBlogPostContent() (string, error) {
+// TODO integrate previous posts into messages (Store in DB?, persistent message queue?)
+func generateBlogPostContent(title string) (string, error) {
 	resp, err := client.CreateChatCompletion(
 		context.Background(),
 		openai.ChatCompletionRequest{
@@ -61,7 +64,7 @@ func generateBlogPostContent() (string, error) {
 			Messages: []openai.ChatCompletionMessage{
 				{
 					Role:    openai.ChatMessageRoleUser,
-					Content: gptNewPostPrompt,
+					Content: fmt.Sprintf(gptNewPostPrompt, title),
 				},
 			},
 		},
@@ -71,7 +74,12 @@ func generateBlogPostContent() (string, error) {
 		return "", err
 	}
 
-	return strings.TrimSpace(resp.Choices[0].Message.Content), nil
+    content := contentForm.FindString(resp.Choices[0].Message.Content)
+    if content == "" {
+        return "", errors.New("content generated in wrong form")
+    }
+
+	return content, nil
 }
 
 func generateBlogPostFileName(content string) string {
@@ -125,9 +133,23 @@ func commitPost(content string) error {
 	})
 }
 
+type PubSubMessage struct {
+    Message struct {
+        Data []byte `json:"data"`
+    } `json:"message"`
+}
+
 func createPost(ctx context.Context, e event.Event) error {
-	log.Println("Generating Post Content")
-	content, err := generateBlogPostContent()
+    log.Println("Parsing Event Data")
+    var m PubSubMessage
+    err := e.DataAs(&m)
+    if err != nil {
+        return err
+    }	
+    log.Printf("Requested Title: %s", string(m.Message.Data))
+	
+    log.Println("Generating Post Content")
+	content, err := generateBlogPostContent(string(m.Message.Data))
 	if err != nil {
 		return err
 	}
